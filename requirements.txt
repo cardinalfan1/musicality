@@ -1,0 +1,10 @@
+yt-dlp
+librosa
+numpy
+scipy
+pygame
+python-dotenv
+matplotlib
+soundfile
+PyQt6
+requests
