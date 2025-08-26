@@ -200,6 +200,36 @@ class SimpleAnalyzer:
         print("Use Training Mode to mark phrase boundaries")
         return result
     
+    def save_training_data(self, audio_path, training_data):
+        """Save all training data including beats and tempo sections."""
+        cache_path = self.get_cache_path(audio_path)
+        
+        if cache_path.exists():
+            with open(cache_path, 'r') as f:
+                data = json.load(f)
+        else:
+            data = {
+                'boundaries': [],
+                'duration': 300,
+                'audio_path': audio_path,
+                'tempo': 120
+            }
+        
+        # Update with all training data
+        data['manual_boundaries'] = training_data.get('phrase_marks', [])
+        data['boundaries'] = training_data.get('phrase_marks', [])
+        data['beat_times'] = training_data.get('beat_times', [])
+        data['downbeats'] = training_data.get('downbeats', [])
+        data['tempo_sections'] = training_data.get('tempo_sections', [])
+        if training_data.get('manual_tempo'):
+            data['tempo'] = training_data['manual_tempo']
+        
+        with open(cache_path, 'w') as f:
+            json.dump(data, f)
+        
+        print(f"Saved complete training data with {len(data['manual_boundaries'])} phrases and {len(data.get('tempo_sections', []))} tempo sections")
+        return data
+    
     def save_manual_boundaries(self, audio_path, boundaries):
         """Save user-defined phrase boundaries."""
         cache_path = self.get_cache_path(audio_path)
@@ -226,10 +256,14 @@ class SimpleAnalyzer:
     
     def get_measure_offset(self, boundary_time, beat_times, tempo, measures_before):
         """Calculate the start time that is X measures before the boundary."""
-        if not beat_times or tempo <= 0:
+        if not beat_times:
             # Fallback to simple time calculation
-            seconds_per_measure = (60.0 / tempo) * 4  # 4 beats per measure
-            return max(0, boundary_time - (measures_before * seconds_per_measure))
+            if tempo and tempo > 0:
+                seconds_per_measure = (60.0 / tempo) * 4  # 4 beats per measure
+                return max(0, boundary_time - (measures_before * seconds_per_measure))
+            else:
+                # Default fallback
+                return max(0, boundary_time - (measures_before * 8))  # Assume ~120 BPM
         
         # Find the beat closest to the boundary
         import numpy as np
@@ -246,5 +280,19 @@ class SimpleAnalyzer:
             return beat_times[start_beat_idx]
         else:
             # Fallback if we don't have enough beats
-            seconds_per_measure = (60.0 / tempo) * 4
-            return max(0, boundary_time - (measures_before * seconds_per_measure))
+            # Use the actual beat spacing near the boundary for better accuracy
+            if boundary_beat_idx > 0:
+                # Calculate average beat interval near the boundary
+                nearby_beats = beat_times[max(0, boundary_beat_idx-4):boundary_beat_idx+1]
+                if len(nearby_beats) > 1:
+                    intervals = [nearby_beats[i+1] - nearby_beats[i] for i in range(len(nearby_beats)-1)]
+                    avg_beat_interval = sum(intervals) / len(intervals)
+                    measure_duration = avg_beat_interval * 4
+                    return max(0, boundary_time - (measures_before * measure_duration))
+            
+            # Final fallback
+            if tempo and tempo > 0:
+                seconds_per_measure = (60.0 / tempo) * 4
+                return max(0, boundary_time - (measures_before * seconds_per_measure))
+            else:
+                return max(0, boundary_time - (measures_before * 8))

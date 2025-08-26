@@ -200,6 +200,7 @@ class MusicilityApp(QMainWindow):
         self.beat_label = QLabel("")
         self.beat_label.setFont(QFont("Arial", 16, QFont.Weight.Bold))
         self.beat_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.beat_label.setFixedHeight(40)  # Fixed height to prevent jumping
         info_layout.addWidget(self.beat_label)
         
         info_group.setLayout(info_layout)
@@ -667,29 +668,78 @@ class MusicilityApp(QMainWindow):
             progress = int(((position - start) / (end - start)) * 100)
             self.progress_bar.setValue(min(100, max(0, progress)))
             
-            # Update beat display
+            # Update beat display (same logic as training mode)
             if self.current_analysis:
                 beat_times = self.current_analysis.get('beat_times', [])
                 downbeats = self.current_analysis.get('downbeats', [])
+                manual_boundaries = self.current_analysis.get('manual_boundaries', [])
                 
                 if beat_times:
                     # Find closest beat
-                    closest_beat_idx = min(range(len(beat_times)), 
-                                         key=lambda i: abs(beat_times[i] - position),
-                                         default=-1)
+                    import numpy as np
+                    beat_array = np.array(beat_times)
+                    distances = np.abs(beat_array - position)
+                    closest_beat_idx = np.argmin(distances) if len(distances) > 0 else -1
                     
-                    if closest_beat_idx >= 0:
+                    if closest_beat_idx >= 0 and closest_beat_idx < len(beat_times):
                         beat_time = beat_times[closest_beat_idx]
-                        # Check if we're close to this beat (within 0.1 seconds)
-                        if abs(beat_time - position) < 0.1:
-                            # Check if it's a downbeat
-                            if beat_time in downbeats:
-                                self.beat_label.setText("● DOWNBEAT")
-                                self.beat_label.setStyleSheet("color: #ff4444;")
+                        # Check if we're close to this beat (within 0.15 seconds)
+                        if distances[closest_beat_idx] < 0.15:
+                            # Find the most recent phrase mark and count beats from there
+                            beats_since_phrase = 0
+                            
+                            if manual_boundaries:
+                                # Find the most recent phrase mark
+                                most_recent_phrase = None
+                                for mark in sorted(manual_boundaries, reverse=True):
+                                    if mark <= position:
+                                        most_recent_phrase = mark
+                                        break
+                                
+                                if most_recent_phrase is not None:
+                                    # Count beats from the phrase mark to current position
+                                    beats_since_phrase = 0
+                                    for bt in beat_times:
+                                        if bt >= most_recent_phrase and bt <= beat_time:
+                                            beats_since_phrase += 1
+                                    beats_since_phrase = max(0, beats_since_phrase - 1)
+                                else:
+                                    beats_since_phrase = closest_beat_idx
                             else:
-                                beat_number = (closest_beat_idx % 4) + 1
-                                self.beat_label.setText(f"○ Beat {beat_number}")
-                                self.beat_label.setStyleSheet("color: #44ff44;")
+                                beats_since_phrase = closest_beat_idx
+                            
+                            # Calculate which 8-count we're in and the beat within it
+                            eight_count_number = (beats_since_phrase // 8) + 1
+                            beat_num = (beats_since_phrase % 8) + 1
+                            
+                            # Check if it's a boom beat
+                            is_boom = False
+                            if downbeats:
+                                for boom_time in downbeats:
+                                    if abs(beat_time - boom_time) < 0.01:
+                                        is_boom = True
+                                        break
+                            
+                            # Get current tempo from tempo sections if available
+                            current_tempo = None
+                            tempo_sections = self.current_analysis.get('tempo_sections', [])
+                            if tempo_sections:
+                                for section in tempo_sections:
+                                    if section['start'] <= position < section['end']:
+                                        current_tempo = section['tempo']
+                                        break
+                            
+                            if not current_tempo:
+                                current_tempo = self.current_analysis.get('tempo')
+                            
+                            tempo_str = f" @ {current_tempo:.0f}bpm" if current_tempo else ""
+                            
+                            if is_boom:
+                                self.beat_label.setText(f"● Beat {beat_num}/8 [Set {eight_count_number}] (BOOM){tempo_str}")
+                                self.beat_label.setStyleSheet("color: #ff4444; background-color: #441111; padding: 5px; border-radius: 5px;")
+                            else:
+                                self.beat_label.setText(f"○ Beat {beat_num}/8 [Set {eight_count_number}] (tick){tempo_str}")
+                                self.beat_label.setStyleSheet("color: #44ff44; background-color: #114411; padding: 5px; border-radius: 5px;")
                         else:
                             self.beat_label.setText("")
                             self.beat_label.setStyleSheet("color: #888;")
@@ -806,6 +856,7 @@ class MusicilityApp(QMainWindow):
         # Open training dialog with beat times for snapping
         dialog = TrainingModeDialog(audio_path, title, duration, beat_times, downbeats, self)
         dialog.phrases_marked.connect(self.on_training_complete)
+        dialog.training_complete.connect(self.on_full_training_complete)
         
         # Load existing marks if any
         existing_marks = self.current_analysis.get('manual_boundaries', [])
@@ -819,6 +870,22 @@ class MusicilityApp(QMainWindow):
         dialog.activateWindow()
         dialog.setFocus()
         dialog.exec()
+    
+    def on_full_training_complete(self, training_data):
+        """Handle complete training data including beats and tempo."""
+        if not training_data:
+            return
+        
+        # Update current analysis with all training data
+        self.current_analysis['beat_times'] = training_data.get('beat_times', [])
+        self.current_analysis['downbeats'] = training_data.get('downbeats', [])
+        self.current_analysis['tempo_sections'] = training_data.get('tempo_sections', [])
+        if training_data.get('manual_tempo'):
+            self.current_analysis['tempo'] = training_data['manual_tempo']
+        
+        # Save to analyzer cache with all data
+        audio_path = self.current_analysis['audio_path']
+        self.analyzer.save_training_data(audio_path, training_data)
     
     def on_training_complete(self, phrase_marks):
         """Handle completion of training mode."""

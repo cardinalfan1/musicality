@@ -6,6 +6,7 @@ import pygame
 
 class TrainingModeDialog(QDialog):
     phrases_marked = pyqtSignal(list)
+    training_complete = pyqtSignal(dict)  # Emit all training data
     
     def __init__(self, audio_path, song_title, duration, beat_times=None, downbeats=None, parent=None):
         super().__init__(parent)
@@ -241,6 +242,10 @@ class TrainingModeDialog(QDialog):
             
         new_pos = min(current_pos + 5, self.duration)
         
+        # Show which tempo section we're in
+        current_tempo = self.get_current_tempo(new_pos)
+        tempo_str = f" ({current_tempo:.0f} BPM)" if current_tempo else ""
+        
         if self.is_playing:
             # Playing - restart from new position
             pygame.mixer.music.stop()
@@ -251,7 +256,7 @@ class TrainingModeDialog(QDialog):
             # Paused - just update pause position
             self.pause_position = new_pos
             
-        self.last_mark_label.setText(f"Skipped to {new_pos:.1f}s")
+        self.last_mark_label.setText(f"Skipped to {new_pos:.1f}s{tempo_str}")
         # Force immediate position update
         self.update_position()
     
@@ -269,6 +274,10 @@ class TrainingModeDialog(QDialog):
             
         new_pos = max(current_pos - 5, 0)
         
+        # Show which tempo section we're in
+        current_tempo = self.get_current_tempo(new_pos)
+        tempo_str = f" ({current_tempo:.0f} BPM)" if current_tempo else ""
+        
         if self.is_playing:
             # Playing - restart from new position
             pygame.mixer.music.stop()
@@ -279,7 +288,7 @@ class TrainingModeDialog(QDialog):
             # Paused - just update pause position
             self.pause_position = new_pos
             
-        self.last_mark_label.setText(f"Skipped to {new_pos:.1f}s")
+        self.last_mark_label.setText(f"Skipped to {new_pos:.1f}s{tempo_str}")
         # Force immediate position update
         self.update_position()
     
@@ -324,30 +333,40 @@ class TrainingModeDialog(QDialog):
         # Check if this is a tempo change (user has tapped before and there's a recent phrase mark)
         is_tempo_change = False
         section_start = 0
+        current_section_start = 0
         
-        # Check if we need to start a new tempo section
-        if self.has_tapped_before and self.phrase_marks and len(self.beat_taps) > 0:
-            # Check if our last tap was before the most recent phrase mark
-            last_tap_time = self.beat_taps[-1] if self.beat_taps else 0
-            
+        # Find which phrase section we're currently in
+        if self.phrase_marks:
             for mark in sorted(self.phrase_marks, reverse=True):
-                if mark < current_time and mark > last_tap_time:
-                    # We crossed a phrase boundary - start new tempo detection
-                    section_start = mark
+                if mark <= current_time:
+                    current_section_start = mark
+                    break
+        
+        # Check if we need to start tempo detection for a new section
+        if self.has_tapped_before:
+            # Check if we have any taps
+            if self.beat_taps:
+                # Find which section our last tap was in
+                last_tap_time = self.beat_taps[-1]
+                last_tap_section = 0
+                for mark in sorted(self.phrase_marks, reverse=True):
+                    if mark <= last_tap_time:
+                        last_tap_section = mark
+                        break
+                
+                # If we're in a different section, start new tempo detection
+                if current_section_start != last_tap_section:
+                    section_start = current_section_start
                     is_tempo_change = True
                     self.beat_taps = []  # Clear for new section
-                    self.beat_calibration_label.setText("Detecting tempo change...")
+                    self.beat_calibration_label.setText(f"Detecting tempo change for section starting at {section_start:.1f}s...")
                     self.beat_calibration_label.setStyleSheet("color: #ffff00; font-weight: bold;")
-                    print(f"Starting new tempo section at phrase mark {mark:.1f}s")
-                    break
-        
-        # If starting fresh (no taps yet but has tapped before and there's a phrase)
-        if self.has_tapped_before and not self.beat_taps and self.phrase_marks:
-            for mark in sorted(self.phrase_marks, reverse=True):
-                if mark < current_time:
-                    section_start = mark
+                    print(f"Starting new tempo section at phrase mark {section_start:.1f}s")
+            else:
+                # No previous taps in this session, check if we're after a phrase mark
+                if current_section_start > 0:
+                    section_start = current_section_start
                     is_tempo_change = True
-                    break
         
         self.beat_taps.append(current_time)
         self.has_tapped_before = True
@@ -412,6 +431,9 @@ class TrainingModeDialog(QDialog):
     
     def add_tempo_section(self, start_time, tempo, beat_interval):
         """Add a new tempo section starting from a specific time."""
+        # Remove any existing tempo section that starts at the same time
+        self.tempo_sections = [s for s in self.tempo_sections if s['start'] != start_time]
+        
         # Find where this section ends (next phrase mark or end of song)
         end_time = self.duration
         for mark in sorted(self.phrase_marks):
@@ -419,14 +441,27 @@ class TrainingModeDialog(QDialog):
                 end_time = mark
                 break
         
-        # Generate beats for this section
+        # Check if we need to split an existing section
+        for i, section in enumerate(self.tempo_sections):
+            if section['start'] < start_time < section['end']:
+                # Split the existing section
+                old_end = section['end']
+                section['end'] = start_time
+                # Recalculate beats for the shortened section
+                section['beats'] = []
+                beat_time = section['start']
+                while beat_time < section['end']:
+                    section['beats'].append(beat_time)
+                    beat_time += section['beat_interval']
+        
+        # Generate beats for this new section
         section_beats = []
         beat_time = start_time
         while beat_time < end_time:
             section_beats.append(beat_time)
             beat_time += beat_interval
         
-        # Add to tempo sections
+        # Add the new tempo section
         self.tempo_sections.append({
             'start': start_time,
             'end': end_time,
@@ -606,7 +641,18 @@ class TrainingModeDialog(QDialog):
                 return
         
         pygame.mixer.music.stop()
-        self.phrases_marked.emit(self.phrase_marks)
+        
+        # Emit all training data
+        training_data = {
+            'phrase_marks': self.phrase_marks,
+            'beat_times': self.beat_times,
+            'downbeats': self.downbeats,
+            'tempo_sections': self.tempo_sections,
+            'manual_tempo': self.manual_tempo
+        }
+        
+        self.training_complete.emit(training_data)
+        self.phrases_marked.emit(self.phrase_marks)  # Keep for backward compatibility
         self.accept()
     
     def cancel_dialog(self):
